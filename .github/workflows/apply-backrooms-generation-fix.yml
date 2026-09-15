@@ -11,130 +11,47 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Patch generation
-        shell: python
+      - name: Patch source
         run: |
+          python3 - <<'PY'
           from pathlib import Path
-          import re
 
-          # FloorPlan: one authored module per 8x8 chunk, with explicit walls
-          # between modules. This prevents the current "floor + ceiling + one
-          # wall" appearance while preserving openings selected below.
           p = Path('BackroomsFloorPlan.cpp')
           s = p.read_text(encoding='utf-8')
           old = 'const int32 Module = FMath::Max(8, RS / 4);'
-          new = 'const int32 Module = FMath::Max(8, ChunkCellSize);'
-          if old not in s:
-              raise SystemExit('FloorPlan: module declaration not found')
-          s = s.replace(old, new, 1)
-
-          marker = '''\t}\n\n\tconst int32 SpaceCount = Spaces.Num();\n'''
-          insertion = '''\t}\n\n\t// Every authored module starts enclosed. Later connection passes open\n\t// selected two-cell doorways. Without this pass the previous Open default\n\t// made adjacent rooms merge into one giant box.\n\tfor (int32 MY = 0; MY < Modules; ++MY)\n\t{\n\t\tfor (int32 MX = 0; MX < Modules; ++MX)\n\t\t{\n\t\t\tconst int32 X0 = MX * Module;\n\t\t\tconst int32 Y0 = MY * Module;\n\t\t\tconst int32 X1 = FMath::Min(RS - 1, (MX + 1) * Module - 1);\n\t\t\tconst int32 Y1 = FMath::Min(RS - 1, (MY + 1) * Module - 1);\n\t\t\tif (MX + 1 < Modules)\n\t\t\t{\n\t\t\t\tfor (int32 Y = Y0; Y <= Y1; ++Y)\n\t\t\t\t{\n\t\t\t\t\tSetEdge(X1, Y, EGridDir::East, EFloorEdgeState::Wall);\n\t\t\t\t}\n\t\t\t}\n\t\t\tif (MY + 1 < Modules)\n\t\t\t{\n\t\t\t\tfor (int32 X = X0; X <= X1; ++X)\n\t\t\t\t{\n\t\t\t\t\tSetEdge(X, Y1, EGridDir::North, EFloorEdgeState::Wall);\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n\n\tconst int32 SpaceCount = Spaces.Num();\n'''
-          if marker not in s:
-              raise SystemExit('FloorPlan: boundary insertion marker not found')
+          if old not in s: raise SystemExit('FloorPlan module marker missing')
+          s = s.replace(old, 'const int32 Module = FMath::Max(8, ChunkCellSize);', 1)
+          marker = '\t}\n\n\tconst int32 SpaceCount = Spaces.Num();\n'
+          insertion = '''\t}\n\n\t// Enclose each authored module. Selected connections below reopen doors.\n\tfor (int32 MY = 0; MY < Modules; ++MY)\n\t{\n\t\tfor (int32 MX = 0; MX < Modules; ++MX)\n\t\t{\n\t\t\tconst int32 X0 = MX * Module;\n\t\t\tconst int32 Y0 = MY * Module;\n\t\t\tconst int32 X1 = FMath::Min(RS - 1, (MX + 1) * Module - 1);\n\t\t\tconst int32 Y1 = FMath::Min(RS - 1, (MY + 1) * Module - 1);\n\t\t\tif (MX + 1 < Modules)\n\t\t\t{\n\t\t\t\tfor (int32 Y = Y0; Y <= Y1; ++Y) SetEdge(X1, Y, EGridDir::East, EFloorEdgeState::Wall);\n\t\t\t}\n\t\t\tif (MY + 1 < Modules)\n\t\t\t{\n\t\t\t\tfor (int32 X = X0; X <= X1; ++X) SetEdge(X, Y1, EGridDir::North, EFloorEdgeState::Wall);\n\t\t\t}\n\t\t}\n\t}\n\n\tconst int32 SpaceCount = Spaces.Num();\n'''
+          if marker not in s: raise SystemExit('FloorPlan boundary marker missing')
           s = s.replace(marker, insertion, 1)
-
-          # Make room topology visibly level-dependent without changing the
-          # deterministic seed contract: each level gets a different template
-          # distribution, while L0 remains the classic Backrooms bias.
-          old_call = 'const ERoomTemplate Template = PickTemplate(Seed + InAttempt * 7919, MX, MY);'
-          new_call = 'const int32 LevelSeed = Seed + InAttempt * 7919 + LevelIndex * 104729;\n\t\t\tconst ERoomTemplate Template = PickTemplate(LevelSeed, MX, MY);'
-          if old_call not in s:
-              raise SystemExit('FloorPlan: template call not found')
-          s = s.replace(old_call, new_call, 1)
+          old = 'const ERoomTemplate Template = PickTemplate(Seed + InAttempt * 7919, MX, MY);'
+          if old not in s: raise SystemExit('FloorPlan template marker missing')
+          s = s.replace(old, 'const int32 LevelSeed = Seed + InAttempt * 7919 + LevelIndex * 104729;\n\t\t\tconst ERoomTemplate Template = PickTemplate(LevelSeed, MX, MY);', 1)
           p.write_text(s, encoding='utf-8')
 
-          # WorldGenerator: remove hatch-driven transition. The city is the
-          # entry point; once the hidden Backrooms wave is actually finished,
-          # wait 1.5 s and place the player on the Backrooms floor.
           p = Path('BackroomsWorldGenerator.cpp')
           s = p.read_text(encoding='utf-8')
-
-          trap_old = '''\tStartupPlatformTrapdoor->SetCollisionEnabled(ECollisionEnabled::QueryOnly);\n\tStartupPlatformTrapdoor->SetCollisionObjectType(ECC_WorldDynamic);\n\tStartupPlatformTrapdoor->SetCollisionResponseToAllChannels(ECR_Ignore);\n\tStartupPlatformTrapdoor->SetCollisionResponseToChannel(ECC_Pawn, ECR_Overlap);\n\tStartupPlatformTrapdoor->SetGenerateOverlapEvents(true);\n\tStartupPlatformTrapdoor->OnComponentBeginOverlap.AddDynamic(this, &ABackroomsWorldGenerator::OnTrapdoorOverlap);'''
-          trap_new = '''\t// Legacy hatch is inert. Entry is now an automatic city -> Backrooms fall\n\t// after the hidden Backrooms generation wave finishes.\n\tStartupPlatformTrapdoor->SetCollisionEnabled(ECollisionEnabled::NoCollision);\n\tStartupPlatformTrapdoor->SetGenerateOverlapEvents(false);'''
-          if trap_old not in s:
-              raise SystemExit('WorldGenerator: hatch setup not found')
-          s = s.replace(trap_old, trap_new, 1)
-
-          # Replace the old physical fall-through safety block in Tick with the
-          # deterministic post-generation transition. Keep the exact surrounding
-          # call sites so streaming starts only after the player enters L0.
+          old = '''\tStartupPlatformTrapdoor->SetCollisionEnabled(ECollisionEnabled::QueryOnly);\n\tStartupPlatformTrapdoor->SetCollisionObjectType(ECC_WorldDynamic);\n\tStartupPlatformTrapdoor->SetCollisionResponseToAllChannels(ECR_Ignore);\n\tStartupPlatformTrapdoor->SetCollisionResponseToChannel(ECC_Pawn, ECR_Overlap);\n\tStartupPlatformTrapdoor->SetGenerateOverlapEvents(true);\n\tStartupPlatformTrapdoor->OnComponentBeginOverlap.AddDynamic(this, &ABackroomsWorldGenerator::OnTrapdoorOverlap);'''
+          if old not in s: raise SystemExit('WorldGenerator hatch marker missing')
+          s = s.replace(old, '''\t// Legacy hatch is inert. Entry is automatic after the hidden Backrooms wave.\n\tStartupPlatformTrapdoor->SetCollisionEnabled(ECollisionEnabled::NoCollision);\n\tStartupPlatformTrapdoor->SetGenerateOverlapEvents(false);''', 1)
           start = s.find('\t// Сорвался за край острова / провалился сквозь пол:')
           end = s.find('\n\tUpdateStreaming();', start)
-          if start < 0 or end < 0:
-              raise SystemExit('WorldGenerator: physical fall block not found')
-          replacement = '''\t// City -> Backrooms transition: no hatch and no physical fall onto the\n\t// procedural ceiling. Wait until the initial Backrooms wave is completely\n\t// generated, then give the player a short 1.5 s beat and place the capsule\n\t// directly on the L0 floor.\n\tif (bPlayerSeated && !bPlatformDescentDone && !bPlayerFellToBackrooms && PendingOrder.Num() == 0)\n\t{\n\t\tDescentTimer += DeltaSeconds;\n\t\tif (DescentTimer >= 1.5f)\n\t\t{\n\t\t\tStartDescent();\n\t\t}\n\t}\n'''
-          s = s[:start] + replacement + s[end:]
-
-          # The old platform descent call must not animate the city downward or\n          # interfere with the direct transition. The new StartDescent owns the\n          # complete handoff.
+          if start < 0 or end < 0: raise SystemExit('WorldGenerator fall block markers missing')
+          s = s[:start] + '''\t// Automatic city -> Backrooms transition. Never fall onto the generated ceiling.\n\tif (bPlayerSeated && !bPlatformDescentDone && !bPlayerFellToBackrooms && PendingOrder.Num() == 0)\n\t{\n\t\tDescentTimer += DeltaSeconds;\n\t\tif (DescentTimer >= 1.5f) StartDescent();\n\t}\n''' + s[end:]
           s = s.replace('\n\tUpdatePlatformDescent(DeltaSeconds);', '', 1)
-
-          # Add the direct transition implementation before MarkBackroomsEntered.
           marker = '\nvoid ABackroomsWorldGenerator::MarkBackroomsEntered()\n'
-          if marker not in s:
-              raise SystemExit('WorldGenerator: MarkBackroomsEntered marker not found')
-          impl = r'''
-void ABackroomsWorldGenerator::StartDescent()
-{
-	if (bPlatformDescentDone || bPlayerFellToBackrooms)
-	{
-		return;
-	}
-
-	APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0);
-	APawn* Pawn = PC ? PC->GetPawn() : nullptr;
-	if (!Pawn)
-	{
-		return;
-	}
-
-	const FVector BackroomsFloor(
-		CellSize * ChunkSizeCells * 0.5f,
-		CellSize * ChunkSizeCells * 0.5f,
-		PawnStandZ());
-
-	// Stop movement before the teleport so CharacterMovement cannot keep the
-	// capsule in Falling state for a frame and select the falling animation.
-	Pawn->SetActorLocation(BackroomsFloor, false, nullptr, ETeleportType::TeleportPhysics);
-	Pawn->SetActorRotation(FRotator::ZeroRotator);
-	if (ACharacter* Char = Cast<ACharacter>(Pawn))
-	{
-		if (UCharacterMovementComponent* Movement = Char->GetCharacterMovement())
-		{
-			Movement->StopMovementImmediately();
-			Movement->SetMovementMode(MOVE_Walking);
-		}
-	}
-
-	if (StartPlatform)
-	{
-		StartPlatform->Destroy();
-		StartPlatform = nullptr;
-	}
-
-	bPlayerSeated = false;
-	bPlatformDescentStarted = true;
-	bPlatformDescentDone = true;
-	DescentTimer = 0.0f;
-	FallTimer = 0.0f;
-	bFallTeleported = false;
-	MarkBackroomsEntered();
-	ExitGraceTimer = ExitGracePeriod;
-	UE_LOG(LogTemp, Display, TEXT("BR: city -> Backrooms L0 transition complete after generation + 1.5s"));
-}
-'''
-          s = s.replace(marker, '\n' + impl + marker, 1)
-
-          # Make rebuild reset the new timer.
-          s = s.replace('\tbPlayerSeated = false;\n\tLastPlayerChunk = FIntPoint::ZeroValue;', '\tbPlayerSeated = false;\n\tDescentTimer = 0.0f;\n\tLastPlayerChunk = FIntPoint::ZeroValue;', 1)
+          if marker not in s: raise SystemExit('WorldGenerator StartDescent marker missing')
+          impl = '''\nvoid ABackroomsWorldGenerator::StartDescent()\n{\n\tif (bPlatformDescentDone || bPlayerFellToBackrooms) return;\n\tAPlayerController* PC = UGameplayStatics::GetPlayerController(this, 0);\n\tAPawn* Pawn = PC ? PC->GetPawn() : nullptr;\n\tif (!Pawn) return;\n\tconst FVector BackroomsFloor(CellSize * ChunkSizeCells * 0.5f, CellSize * ChunkSizeCells * 0.5f, PawnStandZ());\n\tPawn->SetActorLocation(BackroomsFloor, false, nullptr, ETeleportType::TeleportPhysics);\n\tPawn->SetActorRotation(FRotator::ZeroRotator);\n\tif (ACharacter* Char = Cast<ACharacter>(Pawn))\n\t{\n\t\tif (UCharacterMovementComponent* Movement = Char->GetCharacterMovement())\n\t\t{\n\t\t\tMovement->StopMovementImmediately();\n\t\t\tMovement->SetMovementMode(MOVE_Walking);\n\t\t}\n\t}\n\tif (StartPlatform) { StartPlatform->Destroy(); StartPlatform = nullptr; }\n\tbPlayerSeated = false;\n\tbPlatformDescentStarted = true;\n\tbPlatformDescentDone = true;\n\tDescentTimer = 0.0f;\n\tFallTimer = 0.0f;\n\tbFallTeleported = false;\n\tMarkBackroomsEntered();\n\tExitGraceTimer = ExitGracePeriod;\n\tUE_LOG(LogTemp, Display, TEXT("BR: city -> Backrooms L0 transition complete after generation + 1.5s"));\n}\n'''
+          s = s.replace(marker, impl + marker, 1)
           p.write_text(s, encoding='utf-8')
-
-      - name: Commit repair and remove workflow
+          PY
+      - name: Commit and remove temporary workflow
         run: |
           git config user.name "backrooms-repair"
           git config user.email "actions@users.noreply.github.com"
           git add BackroomsFloorPlan.cpp BackroomsWorldGenerator.cpp
-          git commit -m "Fix Backrooms room walls and city entry transition" || true
+          git commit -m "Fix Backrooms room walls and city entry transition"
           git rm .github/workflows/apply-backrooms-generation-fix.yml
-          git commit -m "Remove temporary generation repair workflow" || true
+          git commit -m "Remove temporary generation repair workflow"
           git push origin HEAD:main
