@@ -1479,56 +1479,10 @@ void ABackroomsWorldGenerator::UpdatePlatformDescent(float DeltaSeconds)
 	// FallTimer and timers intentionally left empty; bPlatformDescentDone set later.
 }
 
-void ABackroomsWorldGenerator::StartDescent()
-{
-	if (bPlatformDescentStarted)
-	{
-		return;
-	}
-
-	bPlatformDescentStarted = true;
-	FallTimer = 0.0f;
-	bFallTeleported = false;
-
-	// Отключаем коллизию пола города — игрок буквально проваливается под текстуры (noclip glitch)
-	if (StartPlatform)
-	{
-		StartPlatform->SetActorEnableCollision(false);
-	}
-
-	if (APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0))
-	{
-		if (PC->PlayerCameraManager)
-		{
-			PC->PlayerCameraManager->StartCameraFade(0.0f, 1.0f, 2.0f, FLinearColor::Black, true, true);
-		}
-	}
-	if (LoadingBar)
-	{
-		LoadingBar->SetLabel(BackroomsLoc::Get(TEXT("Loading.Noclip")));
-	}
-}
-
 void ABackroomsWorldGenerator::OnTrapdoorOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
 	UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult)
 {
-	if (!OtherActor)
-	{
-		return;
-	}
-	// Ловим только павна игрока (локал-контроллер), не врагов и не перекрытия.
-	APawn* Pawn = Cast<APawn>(OtherActor);
-	if (!Pawn)
-	{
-		return;
-	}
-	if (const APlayerController* PC = Cast<APlayerController>(Pawn->GetController()))
-	{
-		if (PC->IsLocalController())
-		{
-			StartDescent();
-		}
-	}
+	// Legacy hatch transition intentionally disabled.
 }
 
 void ABackroomsWorldGenerator::RebuildAllChunks()
