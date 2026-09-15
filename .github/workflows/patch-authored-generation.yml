@@ -1,0 +1,160 @@
+name: Apply authored generation integration
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch authored chunk pipeline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def edit(path, fn):
+              p = Path(path)
+              s = p.read_text(encoding='utf-8')
+              n = fn(s)
+              if n == s:
+                  raise SystemExit(f'No change made to {path}; expected source pattern missing')
+              p.write_text(n, encoding='utf-8')
+
+          edit('BackroomsWorldGenerator.h', lambda s: s
+              .replace('#include "BackroomsLevelTheme.h"', '#include "BackroomsLevelTheme.h"\n#include "BackroomsAuthoredChunk.h"', 1)
+              .replace('\tUPROPERTY(EditAnywhere, Category = "Generation")\n\tTObjectPtr<UPropDatabase> Database;',
+                       '\tUPROPERTY(EditAnywhere, Category = "Generation")\n\tTObjectPtr<UPropDatabase> Database;\n\n\t// Authored chunks are the source of truth for architecture. The world Seed only selects\n\t// a deterministic variant and later fills the explicit sockets of that authored chunk.\n\tUPROPERTY(EditAnywhere, Category = "Generation|Authored")\n\tTArray<TSoftObjectPtr<UBackroomsAuthoredChunk>> AuthoredChunkPool;')
+          )
+
+          edit('BackroomsWorldGenerator.cpp', lambda s: s
+              .replace('#include "BackroomsFloorPlan.h"', '#include "BackroomsFloorPlan.h"\n#include "BackroomsAuthoredChunk.h"', 1)
+              .replace('\t\tULevelGeneratorProfile* Profile = GetActiveProfile();\n\t\t\tif (bUseFloorPlanLevel)',
+                       '''\t\tULevelGeneratorProfile* Profile = GetActiveProfile();
+
+\t\t\t// Authored architecture has priority over procedural FloorPlan when a pool is supplied.
+\t\t\t// Selection is deterministic and derives solely from the world Seed + level + chunk + purpose.
+\t\t\tif (AuthoredChunkPool.Num() > 0)
+\t\t\t{
+\t\t\t\tTArray<UBackroomsAuthoredChunk*> Candidates;
+\t\t\t\tfor (const TSoftObjectPtr<UBackroomsAuthoredChunk>& Soft : AuthoredChunkPool)
+\t\t\t\t{
+\t\t\t\t\tif (UBackroomsAuthoredChunk* Candidate = Soft.LoadSynchronous())
+\t\t\t\t\t{
+\t\t\t\t\t\tif (Candidate->SupportsLevel(LevelIndex))
+\t\t\t\t\t\t{
+\t\t\t\t\t\t\tCandidates.Add(Candidate);
+\t\t\t\t\t\t}
+\t\t\t\t\t}
+\t\t\t\t}
+\t\t\t\tif (Candidates.Num() > 0)
+\t\t\t\t{
+\t\t\t\t\tconst FBackroomsSeedContext SeedContext{Seed, LevelIndex, Coord};
+\t\t\t\t\tFRandomStream VariantRng(SeedContext.MakeStreamSeed(0x41524348u)); // ARCH
+\t\t\t\t\tUBackroomsAuthoredChunk* Selected = Candidates[VariantRng.RandRange(0, Candidates.Num() - 1)];
+\t\t\t\t\tChunk->bUseAuthoredChunk = true;
+\t\t\t\t\tChunk->AssignAuthoredChunk(Selected);
+\t\t\t\t\tChunk->LevelStyle = (EBackroomsLevelStyle)FMath::Clamp(LevelIndex, 0, 9);
+\t\t\t\t\tChunk->BuildChunkFromProfile(Coord.X, Coord.Y,
+\t\t\t\t\t\t(int32)BackroomsChunkSeed(Seed, LevelIndex, FChunkCoord(Coord.X, Coord.Y)), Profile);
+\t\t\t\t\tGridSet(Coord, Chunk);
+\t\t\t\t\t++Spawned;
+\t\t\t\t\tcontinue;
+\t\t\t\t}
+\t\t\t}
+
+\t\t\tif (bUseFloorPlanLevel)''', 1)
+          )
+
+          edit('BackroomsChunkActor.h', lambda s: s
+              .replace('#include "BackroomsFloorPlan.h"', '#include "BackroomsFloorPlan.h"\n#include "BackroomsAuthoredChunk.h"', 1)
+              .replace('class FChunkGenerationData;', 'class FChunkGenerationData;\nclass UStaticMeshComponent;', 1)
+              .replace('\tUPROPERTY()\n\tTObjectPtr<UBackroomsFloorPlan> FloorPlan;',
+                       '\tUPROPERTY()\n\tTObjectPtr<UBackroomsFloorPlan> FloorPlan;\n\n\t// Authored chunk source of truth. When enabled, procedural cell/edge geometry is not used.\n\tUPROPERTY()\n\tTObjectPtr<UBackroomsAuthoredChunk> AuthoredChunk;\n\n\tUPROPERTY()\n\tTObjectPtr<UStaticMeshComponent> AuthoredGeometryMesh;\n\n\tUPROPERTY()\n\tbool bUseAuthoredChunk = false;')
+              .replace('\tvoid AssignFloorPlan(UBackroomsFloorPlan* InPlan);',
+                       '\tvoid AssignFloorPlan(UBackroomsFloorPlan* InPlan);\n\n\tUFUNCTION(BlueprintCallable, Category = "Chunk")\n\tvoid AssignAuthoredChunk(UBackroomsAuthoredChunk* InChunk);')
+              .replace('\tvoid ApplyLevelStyle(EBackroomsLevelStyle NewStyle);',
+                       '\tvoid ApplyLevelStyle(EBackroomsLevelStyle NewStyle);\n\n\t// Builds the authored static geometry and keeps the explicit socket data attached to the chunk.\n\tvoid BuildFromAuthoredChunk();')
+          )
+
+          edit('BackroomsChunkActor.cpp', lambda s: s
+              .replace('#include "BackroomsItemSystem.h"', '#include "BackroomsItemSystem.h"\n#include "Components/StaticMeshComponent.h"', 1)
+              .replace('\tGeometryMesh->bUseComplexAsSimpleCollision = true;',
+                       '\tGeometryMesh->bUseComplexAsSimpleCollision = true;\n\n\tAuthoredGeometryMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("AuthoredGeometryMesh"));\n\tAuthoredGeometryMesh->SetupAttachment(RootComponent);\n\tAuthoredGeometryMesh->SetVisibility(false);\n\tAuthoredGeometryMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);', 1)
+              .replace('void ABackroomsChunkActor::NotifyStoryPropPickedUp(ABackroomsPhysProp* Prop)',
+                       '''void ABackroomsChunkActor::AssignAuthoredChunk(UBackroomsAuthoredChunk* InChunk)
+{
+\tAuthoredChunk = InChunk;
+\tbUseAuthoredChunk = AuthoredChunk != nullptr;
+}
+
+void ABackroomsChunkActor::BuildFromAuthoredChunk()
+{
+\tif (!AuthoredChunk)
+\t{
+\t\tUE_LOG(LogTemp, Error, TEXT("BR: authored chunk (%d,%d) has no asset"), ChunkX, ChunkY);
+\t\treturn;
+\t}
+
+\tGeometryMesh->ClearAllMeshSections();
+\tGeometryMesh->SetVisibility(false);
+\tGeometryMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+\tAuthoredGeometryMesh->SetVisibility(false);
+\tAuthoredGeometryMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+
+\tUStaticMesh* Mesh = AuthoredChunk->PreviewMesh.LoadSynchronous();
+\tif (!Mesh)
+\t{
+\t\tUE_LOG(LogTemp, Error, TEXT("BR: authored chunk '%s' has no PreviewMesh"), *AuthoredChunk->ChunkId.ToString());
+\t\treturn;
+\t}
+
+\tAuthoredGeometryMesh->SetStaticMesh(Mesh);
+\tAuthoredGeometryMesh->SetRelativeLocation(FVector::ZeroVector);
+\tAuthoredGeometryMesh->SetRelativeRotation(FRotator::ZeroRotator);
+\tAuthoredGeometryMesh->SetRelativeScale3D(FVector::OneVector);
+\tAuthoredGeometryMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+\tAuthoredGeometryMesh->SetCollisionResponseToAllChannels(ECR_Block);
+\tAuthoredGeometryMesh->SetVisibility(true);
+
+\tChunkSizeCells = FMath::Max(1, AuthoredChunk->SizeCells.X);
+\tCellSize = FMath::Max(1.0f, AuthoredChunk->CellSize);
+\tUE_LOG(LogTemp, Display, TEXT("BR: authored chunk '%s' selected for L%d at (%d,%d), rooms=%d sockets=%d"),
+\t\t*AuthoredChunk->ChunkId.ToString(), AuthoredChunk->LevelIndex, ChunkX, ChunkY,
+\t\tAuthoredChunk->Rooms.Num(), AuthoredChunk->BoundarySockets.Num());
+}
+
+void ABackroomsChunkActor::NotifyStoryPropPickedUp(ABackroomsPhysProp* Prop)''', 1)
+              .replace('\tif (bSpawnPlatform)\n\t{\n\t\tBuildSpawnPlatform();\n\t\treturn;\n\t}\n\n\tconst bool bClearRoom',
+                       '''\tif (bSpawnPlatform)
+\t{
+\t\tBuildSpawnPlatform();
+\t\treturn;
+\t}
+
+\tif (bUseAuthoredChunk)
+\t{
+\t\tBuildFromAuthoredChunk();
+\t\treturn;
+\t}
+
+\tconst bool bClearRoom''', 2)
+          )
+
+          # The generator's selection call occurs after bSpawnPlatform=false and before FloorPlan.
+          # Make the authored path explicit in both BuildChunk dispatchers; the second replacement
+          # above intentionally patches the two identical platform guards.
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add BackroomsWorldGenerator.h BackroomsWorldGenerator.cpp BackroomsChunkActor.h BackroomsChunkActor.cpp
+          git commit -m "Integrate authored chunks as generation source of truth" || exit 0
+          git push
