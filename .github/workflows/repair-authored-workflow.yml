@@ -1,0 +1,21 @@
+name: repair-authored-workflow
+on:
+  push:
+    branches: [ main ]
+permissions:
+  contents: write
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Repair syntax
+        run: |
+          sed -i "s@// 'ARCH'@// ARCH@g" .github/workflows/integrate-authored-chunks.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/workflows/integrate-authored-chunks.yml
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Fix authored integration workflow syntax"
+          git push
