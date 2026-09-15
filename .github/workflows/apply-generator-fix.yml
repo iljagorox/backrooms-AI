@@ -1,0 +1,130 @@
+name: Apply generator fixes
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch generator
+        shell: python
+        run: |
+          from pathlib import Path
+
+          # FloorPlan: make one room module exactly one 8x8 chunk and author
+          # module boundaries as walls; selected connections reopen them.
+          p = Path('BackroomsFloorPlan.cpp')
+          s = p.read_text(encoding='utf-8')
+          old = 'const int32 Module = FMath::Max(8, RS / 4);'
+          new = 'const int32 Module = FMath::Max(8, ChunkCellSize);'
+          if old not in s:
+              raise SystemExit('FloorPlan module line not found')
+          s = s.replace(old, new, 1)
+
+          marker = '\n\tconst int32 SpaceCount = Spaces.Num();\n'
+          insertion = r'''
+
+	// Each authored module is one chunk-sized room. Start module boundaries as
+	// solid walls; OpenBetweenModules below turns selected boundaries into doors.
+	for (int32 MY = 0; MY < Modules; ++MY)
+	{
+		for (int32 MX = 0; MX < Modules; ++MX)
+		{
+			const int32 X0 = MX * Module;
+			const int32 Y0 = MY * Module;
+			const int32 X1 = FMath::Min(RS - 1, (MX + 1) * Module - 1);
+			const int32 Y1 = FMath::Min(RS - 1, (MY + 1) * Module - 1);
+
+			if (MX + 1 < Modules)
+			{
+				for (int32 Y = Y0; Y <= Y1; ++Y)
+				{
+					SetEdge(X1, Y, EGridDir::East, EFloorEdgeState::Wall);
+				}
+			}
+			if (MY + 1 < Modules)
+			{
+				for (int32 X = X0; X <= X1; ++X)
+				{
+					SetEdge(X, Y1, EGridDir::North, EFloorEdgeState::Wall);
+				}
+			}
+		}
+	}
+'''
+          if marker not in s:
+              raise SystemExit('FloorPlan insertion marker not found')
+          s = s.replace(marker, insertion + marker, 1)
+          p.write_text(s, encoding='utf-8')
+
+          # WorldGenerator: remove trapdoor-driven descent. Once the initial
+          # chunk wave is actually finished, wait 1.5 s and teleport the player
+          # directly to the Backrooms floor. No fall onto the ceiling.
+          p = Path('BackroomsWorldGenerator.cpp')
+          s = p.read_text(encoding='utf-8')
+
+          old = '''\tStartupPlatformTrapdoor->SetCollisionEnabled(ECollisionEnabled::QueryOnly);\n\tStartupPlatformTrapdoor->SetCollisionObjectType(ECC_WorldDynamic);\n\tStartupPlatformTrapdoor->SetCollisionResponseToAllChannels(ECR_Ignore);\n\tStartupPlatformTrapdoor->SetCollisionResponseToChannel(ECC_Pawn, ECR_Overlap);\n\tStartupPlatformTrapdoor->SetGenerateOverlapEvents(true);\n\tStartupPlatformTrapdoor->OnComponentBeginOverlap.AddDynamic(this, &ABackroomsWorldGenerator::OnTrapdoorOverlap);'''
+          new = '''\t// Legacy trapdoor kept as an inert component for asset compatibility.\n\t// Descent is automatic after generation; the player must never land on the\n\t// Backrooms ceiling while falling through the city platform.\n\tStartupPlatformTrapdoor->SetCollisionEnabled(ECollisionEnabled::NoCollision);\n\tStartupPlatformTrapdoor->SetGenerateOverlapEvents(false);'''
+          if old not in s:
+              raise SystemExit('trapdoor constructor block not found')
+          s = s.replace(old, new, 1)
+
+          old = '''\tif (StartupPlatformTrapdoor)\n\t{\n\t\t// «Люк»-триггер — видимая точка на дороге, в ~16 м от точки спавна\n\t\t// (заодно не срабатывает моментально на респавне в центре платформы).\n\t\tStartupPlatformTrapdoor->SetWorldLocation(FVector(\n\t\t\tCenterX + CellSize * 2.0f,\n\t\t\tCenterY,\n\t\t\tFallbackZ + 20.0f));\n\t\tStartupPlatformTrapdoor->SetWorldRotation(FRotator::ZeroRotator);\n\t}'''
+          new = '''\t// Trapdoor is intentionally unused. The transition is triggered by\n\t// completed generation in Tick(), not by walking over a hidden trigger.'''
+          if old not in s:
+              raise SystemExit('trapdoor placement block not found')
+          s = s.replace(old, new, 1)
+
+          old = '''\tif (bPlayerSeated && !bPlatformDescentStarted && StartPlatform && !bPlayerFellToBackrooms)\n\t{'''
+          # Disable the old physical-fall recovery block entirely; direct\n          # teleport below is the only transition path now.
+          start = s.find(old)
+          if start == -1:
+              raise SystemExit('old fall block start not found')
+          end_marker = '\n\tUpdateStreaming();\n'
+          end = s.find(end_marker, start)
+          if end == -1:
+              raise SystemExit('old fall block end not found')
+          s = s[:start] + '\t// Physical fall-through recovery is disabled: descent is a deterministic\n\t// post-generation teleport to Z=PawnStandZ(), so the player cannot land on\n\t// the procedural ceiling.\n' + s[end:]
+
+          old = '''\tif (PendingOrder.Num() > 0)\n\t{\n\t\tSpawnPending();\n\t}\n\tTrySpawnMonsterAfterGeneration();'''
+          new = '''\tif (PendingOrder.Num() > 0)\n\t{\n\t\tSpawnPending();\n\t}\n\n\t// The initial world wave must finish before the player enters. Give the\n\t// final generated chunk a short 1.5 s settling window, then transition\n\t// directly to the floor at Z=0 instead of falling through the ceiling.\n\tif (!bPlayerFellToBackrooms && !bPlatformDescentStarted && bPlayerSeated && PendingOrder.Num() == 0)\n\t{\n\t\tDescentTimer += DeltaSeconds;\n\t\tif (DescentTimer >= 1.5f)\n\t\t{\n\t\t\tStartDescent();\n\t\t}\n\t}\n\telse if (PendingOrder.Num() > 0)\n\t{\n\t\tDescentTimer = 0.0f;\n\t}\n\n\tTrySpawnMonsterAfterGeneration();'''
+          if old not in s:
+              raise SystemExit('spawn pending block not found')
+          s = s.replace(old, new, 1)
+
+          old = '''void ABackroomsWorldGenerator::StartDescent()\n{\n\tif (bPlatformDescentStarted)\n\t{\n\t\treturn;\n\t}\n\n\tbPlatformDescentStarted = true;\n\tFallTimer = 0.0f;\n\tbFallTeleported = false;\n\n\t// Отключаем коллизию пола города — игрок буквально проваливается под текстуры (noclip glitch)\n\tif (StartPlatform)\n\t{\n\t\tStartPlatform->SetActorEnableCollision(false);\n\t}\n\n\tif (APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0))\n\t{\n\t\tif (PC->PlayerCameraManager)\n\t\t{\n\t\t\tPC->PlayerCameraManager->StartCameraFade(0.0f, 1.0f, 2.0f, FLinearColor::Black, true, true);\n\t\t}\n\t}\n\tif (LoadingBar)\n\t{\n\t\tLoadingBar->SetLabel(BackroomsLoc::Get(TEXT("Loading.Noclip")));\n\t}\n}'''
+          new = '''void ABackroomsWorldGenerator::StartDescent()\n{\n\tif (bPlatformDescentStarted || bPlayerFellToBackrooms)\n\t{\n\t\treturn;\n\t}\n\n\tbPlatformDescentStarted = true;\n\tFallTimer = 0.0f;\n\tbFallTeleported = false;\n\tDescentTimer = 0.0f;\n\n\t// No physical fall. Disable the city collision only after the world is ready,\n\t// then place the player directly on the generated Backrooms floor.\n\tif (StartPlatform)\n\t{\n\t\tStartPlatform->SetActorEnableCollision(false);\n\t}\n\n\tif (APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0))\n\t{\n\t\tif (APawn* Pawn = PC->GetPawn())\n\t\t{\n\t\t\tconst FVector FloorSpawn(\n\t\t\t\tCellSize * ChunkSizeCells * 0.5f,\n\t\t\t\tCellSize * ChunkSizeCells * 0.5f,\n\t\t\t\tPawnStandZ());\n\t\t\tPawn->SetActorLocation(FloorSpawn);\n\t\t\tPawn->SetActorRotation(FRotator::ZeroRotator);\n\t\t\tif (ACharacter* Char = Cast<ACharacter>(Pawn))\n\t\t\t{\n\t\t\t\tif (UCharacterMovementComponent* Movement = Char->GetCharacterMovement())\n\t\t\t\t{\n\t\t\t\t\tMovement->StopMovementImmediately();\n\t\t\t\t\tMovement->SetMovementMode(MOVE_Walking);\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n\n\tbPlayerSeated = false;\n\tbPlatformDescentDone = true;\n\tMarkBackroomsEntered();\n\tExitGraceTimer = ExitGracePeriod;\n\n\tUE_LOG(LogTemp, Display, TEXT("BR: automatic descent complete — player placed on Backrooms floor after generation + 1.5s"));\n}'''
+          if old not in s:
+              raise SystemExit('StartDescent function not found')
+          s = s.replace(old, new, 1)
+
+          old = '''void ABackroomsWorldGenerator::OnTrapdoorOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,\n\tUPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult)\n{\n\tif (!OtherActor)\n\t{\n\t\treturn;\n\t}\n\t// Ловим только павна игрока (локал-контроллер), не врагов и не перекрытия.\n\tAPawn* Pawn = Cast<APawn>(OtherActor);\n\tif (!Pawn)\n\t{\n\t\treturn;\n\t}\n\tif (const APlayerController* PC = Cast<APlayerController>(Pawn->GetController()))\n\t{\n\t\tif (PC->IsLocalController())\n\t\t{\n\t\t\tStartDescent();\n\t\t}\n\t}\n}'''
+          new = '''void ABackroomsWorldGenerator::OnTrapdoorOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,\n\tUPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult)\n{\n\t// Legacy callback intentionally inert. Descent is never triggered by a trapdoor.\n}'''
+          if old not in s:
+              raise SystemExit('trapdoor callback not found')
+          s = s.replace(old, new, 1)
+
+          old = '''\tbPlatformDescentStarted = false;\n\tbPlatformDescentDone = false;\n\tbPlayerFellToBackrooms = false;'''
+          new = '''\tbPlatformDescentStarted = false;\n\tbPlatformDescentDone = false;\n\tbPlayerFellToBackrooms = false;\n\tDescentTimer = 0.0f;'''
+          if old not in s:
+              raise SystemExit('rebuild descent reset block not found')
+          s = s.replace(old, new, 1)
+
+          p.write_text(s, encoding='utf-8')
+
+      - name: Commit patched files
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add BackroomsFloorPlan.cpp BackroomsWorldGenerator.cpp .github/workflows/apply-generator-fix.yml
+          git diff --cached --quiet && exit 0
+          git commit -m 'Fix FloorPlan walls and automatic Backrooms transition'
+          git push
