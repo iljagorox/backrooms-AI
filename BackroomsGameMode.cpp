@@ -19,11 +19,9 @@ namespace
 			return;
 		}
 
-		// FloorPlan currently builds the floor as a procedural mesh. Keep a thin,
-		// deterministic simple floor collider under each generated Backrooms chunk.
-		// This is deliberately separate from visual geometry: it guarantees that
-		// ACharacter floor detection cannot lose the floor because of procedural
-		// mesh collision cooking/section state.
+		// FloorPlan builds visual floor geometry in WORLD coordinates while chunk
+		// actors intentionally stay at (0,0,0). Therefore every chunk needs its
+		// own local collider centered at that chunk's world-space center.
 		for (TActorIterator<ABackroomsChunkActor> It(World); It; ++It)
 		{
 			ABackroomsChunkActor* Chunk = *It;
@@ -64,13 +62,17 @@ namespace
 			}
 
 			const float HalfSize = FMath::Max(50.0f, Chunk->CellSize * Chunk->ChunkSizeCells * 0.5f);
+			const FVector ChunkCenter(
+				(float)Chunk->ChunkX * Chunk->ChunkSizeCells * Chunk->CellSize + HalfSize,
+				(float)Chunk->ChunkY * Chunk->ChunkSizeCells * Chunk->CellSize + HalfSize,
+				-5.0f);
 			FloorCollider->SetBoxExtent(FVector(HalfSize, HalfSize, 5.0f));
-			FloorCollider->SetRelativeLocation(FVector(0.0f, 0.0f, -5.0f));
+			FloorCollider->SetRelativeLocation(ChunkCenter);
 		}
 
-		// The imported Karelia skeletal mesh is sometimes authored with its long
-		// body axis in X/Y instead of UE's Z-up. Detect that from the mesh bounds
-		// and rotate only the visual mesh; the Character capsule stays upright.
+		// The imported Karelia skeletal mesh can be authored with its long body
+		// axis in X/Y instead of UE's Z-up. Detect that from the asset bounds and
+		// rotate only the visual mesh; the Character capsule remains upright.
 		for (TActorIterator<ABackroomsRiggedMonster> It(World); It; ++It)
 		{
 			ABackroomsRiggedMonster* Monster = *It;
@@ -101,8 +103,8 @@ namespace
 				}
 			}
 
-			// Repair an invalid Falling spawn after the generator's initial floor
-			// trace. Start below the ceiling so the trace cannot hit the ceiling first.
+			// Repair an invalid Falling state after generation. Trace only inside the
+			// room height so a ceiling cannot be selected as the floor.
 			UCharacterMovementComponent* Move = Monster->GetCharacterMovement();
 			if (!Move || !Move->IsFalling())
 			{
@@ -110,8 +112,7 @@ namespace
 			}
 
 			const FVector P = Monster->GetActorLocation();
-			const float TraceTop = 250.0f;
-			const FVector Start(P.X, P.Y, TraceTop);
+			const FVector Start(P.X, P.Y, 250.0f);
 			const FVector End(P.X, P.Y, -100.0f);
 			FHitResult Hit;
 			FCollisionQueryParams Params(SCENE_QUERY_STAT(BackroomsMonsterFloorRepair), false, Monster);
@@ -139,7 +140,7 @@ void ABackroomsGameMode::BeginPlay()
 	if (UWorld* World = GetWorld())
 	{
 		// Chunks are generated asynchronously after GameMode::BeginPlay. Recheck
-		// briefly while generation is active; the operation is idempotent.
+		// periodically; the operation is idempotent and also repairs late spawns.
 		FTimerHandle StabilizeTimer;
 		World->GetTimerManager().SetTimer(
 			StabilizeTimer,
