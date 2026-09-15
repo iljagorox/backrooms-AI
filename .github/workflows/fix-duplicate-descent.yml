@@ -11,7 +11,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Remove legacy duplicate descent
+      - name: Remove legacy descent implementation
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -20,15 +20,16 @@ jobs:
           s = p.read_text(encoding='utf-8')
           pattern = r'void ABackroomsWorldGenerator::StartDescent\(\)\n\{.*?\n\}\n\nvoid ABackroomsWorldGenerator::OnTrapdoorOverlap'
           matches = list(re.finditer(pattern, s, re.S))
-          if len(matches) != 2:
-              raise SystemExit(f'Expected exactly 2 StartDescent definitions, found {len(matches)}')
-          # The first is the legacy hatch/fade implementation. Keep the second,
-          # which is the direct city -> floor teleport implementation.
-          m = matches[0]
-          replacement = '''void ABackroomsWorldGenerator::OnTrapdoorOverlap'''
-          s = s[:m.start()] + replacement + s[m.end():]
-          # Make the remaining trapdoor callback explicitly inert; constructor no
-          # longer binds it, but the UFUNCTION remains a safe compatibility stub.
+          legacy = None
+          for m in matches:
+              body = m.group(0)
+              if 'StartCameraFade' in body and 'bPlatformDescentStarted = true' in body:
+                  legacy = m
+                  break
+          if legacy is None:
+              raise SystemExit(f'Legacy StartDescent not found; definitions={len(matches)}')
+          s = s[:legacy.start()] + 'void ABackroomsWorldGenerator::OnTrapdoorOverlap' + s[legacy.end():]
+
           start = s.find('void ABackroomsWorldGenerator::OnTrapdoorOverlap')
           end = s.find('\nvoid ABackroomsWorldGenerator::RebuildAllChunks', start)
           if start < 0 or end < 0:
@@ -36,17 +37,15 @@ jobs:
           inert = '''void ABackroomsWorldGenerator::OnTrapdoorOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,\n\tUPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult)\n{\n\t// Legacy hatch transition intentionally disabled.\n}\n'''
           s = s[:start] + inert + s[end:]
           p.write_text(s, encoding='utf-8')
-
-          # Remove the temporary trigger file used by the previous repair run.
-          Path('.github/repair-trigger.txt').unlink(missing_ok=True)
+          Path('.github/descent-cleanup-trigger.txt').unlink(missing_ok=True)
           PY
       - name: Commit and remove workflow
         run: |
           git config user.name "backrooms-repair"
           git config user.email "actions@users.noreply.github.com"
           git add BackroomsWorldGenerator.cpp
-          git add -u .github/repair-trigger.txt
-          git commit -m "Remove duplicate legacy descent implementation"
+          git add -u .github/descent-cleanup-trigger.txt
+          git commit -m "Remove legacy hatch descent implementation"
           git rm .github/workflows/fix-duplicate-descent.yml
           git commit -m "Remove temporary descent cleanup workflow"
           git push origin HEAD:main
