@@ -67,9 +67,6 @@ namespace
 		GAddQuad(G,P[0],P[1],P[5],P[4],FVector(0,-1,0),UVScale,Slot);
 	}
 
-	// Four authored-in-code room families. Each family has deterministic variants.
-	// The important rule is that the generator selects a template; it does not
-	// invent arbitrary wall cells. The same seed always selects the same template.
 	enum class ERoomTemplate : uint8
 	{
 		Rect = 0,
@@ -114,7 +111,9 @@ void UBackroomsFloorPlan::Generate(int32 InWorldSeed, const FIntPoint& InRegionC
 	Connections.Reset();
 	BoundaryContracts.Reset();
 	CellSpaceGrid.Init(INDEX_NONE, RS * RS);
-	EdgeStates.Init((uint8)EFloorEdgeState::Wall, RS * RS * 2 + 4 * RS);
+	// Cell interiors are open by default. Walls/partitions are explicitly authored
+	// below; defaulting every edge to Wall creates the old grid/sticks maze.
+	EdgeStates.Init((uint8)EFloorEdgeState::Open, RS * RS * 2 + 4 * RS);
 
 	auto SetEdge = [&](int32 X, int32 Y, EGridDir Dir, EFloorEdgeState State)
 	{
@@ -122,7 +121,6 @@ void UBackroomsFloorPlan::Generate(int32 InWorldSeed, const FIntPoint& InRegionC
 		if (Id != INDEX_NONE && EdgeStates.IsValidIndex(Id)) EdgeStates[Id] = (uint8)State;
 	};
 
-	// Region seams are always open. This preserves streaming continuity.
 	const FIntPoint NReg[4] = {{1,0},{-1,0},{0,1},{0,-1}};
 	const EEdgeID RegEdges[4] = {EEdgeID::EastEdge,EEdgeID::WestEdge,EEdgeID::NorthEdge,EEdgeID::SouthEdge};
 	for (int32 i=0;i<4;++i)
@@ -145,11 +143,6 @@ void UBackroomsFloorPlan::Generate(int32 InWorldSeed, const FIntPoint& InRegionC
 		SetEdge(x,RS-1,EGridDir::North,EFloorEdgeState::Open);
 	}
 
-	// ------------------------------------------------------------
-	// 1. Build a deterministic 4x4 room/module layout.
-	// Every module is a predefined family with a seed-selected variant.
-	// There is no random per-cell wall noise anymore.
-	// ------------------------------------------------------------
 	for (int32 MY=0; MY<Modules; ++MY)
 	{
 		for (int32 MX=0; MX<Modules; ++MX)
@@ -189,8 +182,6 @@ void UBackroomsFloorPlan::Generate(int32 InWorldSeed, const FIntPoint& InRegionC
 			if (Template == ERoomTemplate::OpenHall) Sp.EnvironmentalTags.Add(FName(TEXT("Open")));
 			Spaces.Add(Sp);
 
-			// Authored room-template geometry. These are sparse, intentional partitions,
-			// always with deterministic door gaps so the room remains traversable.
 			const int32 X0 = MX*Module;
 			const int32 Y0 = MY*Module;
 			const int32 X1 = FMath::Min(RS-1,(MX+1)*Module-1);
@@ -219,7 +210,6 @@ void UBackroomsFloorPlan::Generate(int32 InWorldSeed, const FIntPoint& InRegionC
 			}
 			else if (Template == ERoomTemplate::Wide)
 			{
-				// One short divider creates a wider room with a side niche.
 				const bool bVertical = FP_Choice(Seed ^ 0xA2, MX, MY, 2) == 0;
 				if (bVertical)
 				{
@@ -235,11 +225,6 @@ void UBackroomsFloorPlan::Generate(int32 InWorldSeed, const FIntPoint& InRegionC
 
 	const int32 SpaceCount = Spaces.Num();
 
-	// ------------------------------------------------------------
-	// 2. Connect modules with a deterministic spanning tree.
-	// Every room gets a real opening. Extra openings create loops, but only
-	// where the seed selects them. This makes the seed control topology.
-	// ------------------------------------------------------------
 	auto OpenBetweenModules = [&](int32 A, int32 B, EGridDir Dir)
 	{
 		const int32 AX = (A % Modules) * Module;
@@ -271,7 +256,6 @@ void UBackroomsFloorPlan::Generate(int32 InWorldSeed, const FIntPoint& InRegionC
 				OpenBetweenModules(S,S-Modules,EGridDir::South);
 		}
 	}
-	// Extra loops: deterministic and deliberately limited.
 	for (int32 my=0;my<Modules;++my)
 	{
 		for (int32 mx=0;mx<Modules;++mx)
@@ -284,8 +268,6 @@ void UBackroomsFloorPlan::Generate(int32 InWorldSeed, const FIntPoint& InRegionC
 		}
 	}
 
-	// A few boundary exits are selected from the same seed. They are openings,
-	// not walls, so adjacent regions remain compatible.
 	for (int32 side=0;side<4;++side)
 	{
 		if (FP_Unit(FP_Hash(Seed ^ 0xD0,RegionCoordinate.X+side,RegionCoordinate.Y-side)) > 0.45f) continue;
@@ -296,10 +278,6 @@ void UBackroomsFloorPlan::Generate(int32 InWorldSeed, const FIntPoint& InRegionC
 		if (side==3) { SetEdge(P,0,EGridDir::South,EFloorEdgeState::Opening); SetEdge(P+1,0,EGridDir::South,EFloorEdgeState::Opening); }
 	}
 
-	// ------------------------------------------------------------
-	// 3. Sparse structural columns. Columns are a property of selected large
-	// room templates, never a global lattice. This removes the old "sticks" look.
-	// ------------------------------------------------------------
 	for (int32 S=0;S<SpaceCount;++S)
 	{
 		FBackroomsSpaceData& Sp=Spaces[S];
@@ -316,7 +294,6 @@ void UBackroomsFloorPlan::Generate(int32 InWorldSeed, const FIntPoint& InRegionC
 		}
 	}
 
-	// Semantic openings/connections.
 	{
 		TSet<int32> Seen;
 		for (int32 y=0;y<RS;++y)
@@ -514,7 +491,6 @@ void UBackroomsFloorPlan::ExtractChunk(const FChunkCoord& ChunkCoord, FChunkGeom
 		}
 	}
 
-	// One or two ceiling fixtures per room, rather than a dense global grid.
 	for(int32 S=0;S<SpaceCount;++S)
 	{
 		const FBackroomsSpaceData& Sp=Spaces[S];
@@ -531,7 +507,6 @@ void UBackroomsFloorPlan::ExtractChunk(const FChunkCoord& ChunkCoord, FChunkGeom
 		(void)MX; (void)MY;
 	}
 
-	// Small deterministic prop budget per room. Placement is contextual, not noise.
 	for(int32 S=0;S<SpaceCount;++S)
 	{
 		const FBackroomsSpaceData& Sp=Spaces[S];
