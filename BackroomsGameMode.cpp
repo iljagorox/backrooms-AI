@@ -5,6 +5,7 @@
 #include "BackroomsRiggedMonster.h"
 #include "Kismet/GameplayStatics.h"
 #include "Components/BoxComponent.h"
+#include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "EngineUtils.h"
