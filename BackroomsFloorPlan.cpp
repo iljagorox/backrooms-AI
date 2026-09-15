@@ -99,7 +99,7 @@ void UBackroomsFloorPlan::Generate(int32 InWorldSeed, const FIntPoint& InRegionC
 	GenerationAttempt = InAttempt;
 
 	const int32 RS = RegionSizeCells;
-	const int32 Module = FMath::Max(8, RS / 4);
+	const int32 Module = FMath::Max(8, ChunkCellSize);
 	const int32 Modules = FMath::Max(1, RS / Module);
 	const int32 Seed = WorldSeed;
 	const float OpennessBias = 0.35f + 0.65f * FP_Unit(FP_Hash(Seed ^ 0x11, RegionCoordinate.X, RegionCoordinate.Y));
@@ -147,7 +147,8 @@ void UBackroomsFloorPlan::Generate(int32 InWorldSeed, const FIntPoint& InRegionC
 	{
 		for (int32 MX=0; MX<Modules; ++MX)
 		{
-			const ERoomTemplate Template = PickTemplate(Seed + InAttempt * 7919, MX, MY);
+			const int32 LevelSeed = Seed + InAttempt * 7919 + LevelIndex * 104729;
+			const ERoomTemplate Template = PickTemplate(LevelSeed, MX, MY);
 			const int32 SpaceId = Spaces.Num();
 			FBackroomsSpaceData Sp;
 			Sp.Handle = FBackroomsSpaceHandle(RegionCoordinate, SpaceId);
@@ -219,6 +220,26 @@ void UBackroomsFloorPlan::Generate(int32 InWorldSeed, const FIntPoint& InRegionC
 				{
 					for (int32 x=X0+3;x<=X0+Module/2-1;++x) SetEdge(x,MidY-1,EGridDir::North,EFloorEdgeState::Partition);
 				}
+			}
+		}
+	}
+
+	// Enclose each authored module. Selected connections below reopen doors.
+	for (int32 MY = 0; MY < Modules; ++MY)
+	{
+		for (int32 MX = 0; MX < Modules; ++MX)
+		{
+			const int32 X0 = MX * Module;
+			const int32 Y0 = MY * Module;
+			const int32 X1 = FMath::Min(RS - 1, (MX + 1) * Module - 1);
+			const int32 Y1 = FMath::Min(RS - 1, (MY + 1) * Module - 1);
+			if (MX + 1 < Modules)
+			{
+				for (int32 Y = Y0; Y <= Y1; ++Y) SetEdge(X1, Y, EGridDir::East, EFloorEdgeState::Wall);
+			}
+			if (MY + 1 < Modules)
+			{
+				for (int32 X = X0; X <= X1; ++X) SetEdge(X, Y1, EGridDir::North, EFloorEdgeState::Wall);
 			}
 		}
 	}

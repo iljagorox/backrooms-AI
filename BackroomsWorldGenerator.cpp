@@ -69,12 +69,9 @@ ABackroomsWorldGenerator::ABackroomsWorldGenerator()
 	StartupPlatformTrapdoor = CreateDefaultSubobject<USphereComponent>(TEXT("StartupPlatformTrapdoor"));
 	StartupPlatformTrapdoor->InitSphereRadius(120.0f);
 	StartupPlatformTrapdoor->SetupAttachment(RootComponent);
-	StartupPlatformTrapdoor->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
-	StartupPlatformTrapdoor->SetCollisionObjectType(ECC_WorldDynamic);
-	StartupPlatformTrapdoor->SetCollisionResponseToAllChannels(ECR_Ignore);
-	StartupPlatformTrapdoor->SetCollisionResponseToChannel(ECC_Pawn, ECR_Overlap);
-	StartupPlatformTrapdoor->SetGenerateOverlapEvents(true);
-	StartupPlatformTrapdoor->OnComponentBeginOverlap.AddDynamic(this, &ABackroomsWorldGenerator::OnTrapdoorOverlap);
+	// Legacy hatch is inert. Entry is automatic after the hidden Backrooms wave.
+	StartupPlatformTrapdoor->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	StartupPlatformTrapdoor->SetGenerateOverlapEvents(false);
 
 	static ConstructorHelpers::FObjectFinder<UMaterial> CityMatFinder(TEXT("/Game/Materials/M_CityFloor"));
 	if (CityMatFinder.Succeeded())
@@ -1416,62 +1413,11 @@ void ABackroomsWorldGenerator::Tick(float DeltaSeconds)
 		SitPlayerOnPlatform(false);
 	}
 
-	// Сорвался за край острова / провалился сквозь пол: НЕ даём «сидеть на
-	// потолке Бэкрумса» и не телепортируем по ложному срабатыванию. Новая логика:
-	//   - пока игрок в пределах платформы (верх плиты ± неглубокий просад во время
-	//     прогрева коллизии) — ДЕРЖИМ его на верхе плиты (коллизия процедурной
-	//     геометрии появляется не мгновенно, иначе он «проваливается сквозь пол»);
-	//   - телепорт на пол стартовой комнаты Бэкрумса — только при НАСТОЯЩЕМ
-	//     глубоком падении (на 800+ см ниже платформы), а не при сдвиге на 50 см.
-	if (bPlayerSeated && !bPlatformDescentStarted && StartPlatform && !bPlayerFellToBackrooms)
+	// Automatic city -> Backrooms transition. Never fall onto the generated ceiling.
+	if (bPlayerSeated && !bPlatformDescentDone && !bPlayerFellToBackrooms && PendingOrder.Num() == 0)
 	{
-		if (APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0))
-		{
-			if (PC->GetPawn())
-			{
-				const FVector Loc = PC->GetPawn()->GetActorLocation();
-				const float PlatformTop = PlatformCurrentZ + PawnStandZ();
-				const float DeepFallZ = PlatformCurrentZ - 800.0f;
-
-				// Снап только при РЕАЛЬНОМ проваливании сквозь плиту (игрок ниже
-				// верха пола). Раньше условие было Loc.Z < PlatformTop — тогда
-				// стоящий игрок (центр капсулы = верх пола) каждый тик подтягивался
-				// к PlatformTop = пол + полувысота + 5 и висел в воздухе 5 см.
-				if (Loc.Z > DeepFallZ && Loc.Z < PlatformCurrentZ + 1.0f)
-				{
-					// Прогрев коллизии: подтягиваем обратно на верх плиты.
-					FVector Pos = PC->GetPawn()->GetActorLocation();
-					Pos.Z = PlatformTop;
-					PC->GetPawn()->SetActorLocation(Pos);
-					if (ACharacter* Char = Cast<ACharacter>(PC->GetPawn()))
-					{
-						if (UCharacterMovementComponent* Movement = Char->GetCharacterMovement())
-						{
-							Movement->SetMovementMode(MOVE_Walking);
-						}
-					}
-				}
-				else if (Loc.Z <= DeepFallZ)
-				{
-					// Реальный срыв за край/в яму: на пол Бэкрумса в центр площади.
-					// Под городом тоже есть скрытый слой Бэкрумса (см. BeginPlay).
-					FVector Pos(CellSize * ChunkSizeCells * 0.5f, CellSize * ChunkSizeCells * 0.5f, PawnStandZ());
-					PC->GetPawn()->SetActorLocation(Pos);
-					PC->GetPawn()->SetActorRotation(FRotator::ZeroRotator);
-					if (ACharacter* Char = Cast<ACharacter>(PC->GetPawn()))
-					{
-						if (UCharacterMovementComponent* Movement = Char->GetCharacterMovement())
-						{
-							Movement->SetMovementMode(MOVE_Walking);
-						}
-					}
-					bPlayerSeated = false;
-					MarkBackroomsEntered();
-					// Отсчёт давления начинается только с момента входа в Бэкрумс.
-					ExitGraceTimer = ExitGracePeriod;
-				}
-			}
-		}
+		DescentTimer += DeltaSeconds;
+		if (DescentTimer >= 1.5f) StartDescent();
 	}
 
 	UpdateStreaming();
@@ -1487,7 +1433,6 @@ void ABackroomsWorldGenerator::Tick(float DeltaSeconds)
 	UpdateChunkVisibility();
 	UpdateExit(DeltaSeconds);
 
-	UpdatePlatformDescent(DeltaSeconds);
 	TryAutoDump(DeltaSeconds);
 
 	// Первое превью уровня: как только мир достроен и игрок внутри, снимаем
@@ -1890,6 +1835,35 @@ UBackroomsAchievements* ABackroomsWorldGenerator::GetAchievements() const
 		return GI->GetSubsystem<UBackroomsAchievements>();
 	}
 	return nullptr;
+}
+
+void ABackroomsWorldGenerator::StartDescent()
+{
+	if (bPlatformDescentDone || bPlayerFellToBackrooms) return;
+	APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0);
+	APawn* Pawn = PC ? PC->GetPawn() : nullptr;
+	if (!Pawn) return;
+	const FVector BackroomsFloor(CellSize * ChunkSizeCells * 0.5f, CellSize * ChunkSizeCells * 0.5f, PawnStandZ());
+	Pawn->SetActorLocation(BackroomsFloor, false, nullptr, ETeleportType::TeleportPhysics);
+	Pawn->SetActorRotation(FRotator::ZeroRotator);
+	if (ACharacter* Char = Cast<ACharacter>(Pawn))
+	{
+		if (UCharacterMovementComponent* Movement = Char->GetCharacterMovement())
+		{
+			Movement->StopMovementImmediately();
+			Movement->SetMovementMode(MOVE_Walking);
+		}
+	}
+	if (StartPlatform) { StartPlatform->Destroy(); StartPlatform = nullptr; }
+	bPlayerSeated = false;
+	bPlatformDescentStarted = true;
+	bPlatformDescentDone = true;
+	DescentTimer = 0.0f;
+	FallTimer = 0.0f;
+	bFallTeleported = false;
+	MarkBackroomsEntered();
+	ExitGraceTimer = ExitGracePeriod;
+	UE_LOG(LogTemp, Display, TEXT("BR: city -> Backrooms L0 transition complete after generation + 1.5s"));
 }
 
 void ABackroomsWorldGenerator::MarkBackroomsEntered()
