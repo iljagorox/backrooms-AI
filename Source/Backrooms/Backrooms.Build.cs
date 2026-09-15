@@ -21,7 +21,8 @@ public class Backrooms : ModuleRules
             "GameplayTags",
             "Niagara",
             "PhysicsCore",
-            "AnimGraphRuntime"
+            "AnimGraphRuntime",
+            "ProceduralMeshComponent"
         });
 
         PrivateDependencyModuleNames.AddRange(new string[]
@@ -29,8 +30,5 @@ public class Backrooms : ModuleRules
             "RenderCore",
             "RHI"
         });
-
-        // Uncomment if you use YAML or other third-party libs
-        // PublicIncludePaths.AddRange(new string[] { });
     }
 }
