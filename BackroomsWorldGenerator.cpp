@@ -903,6 +903,7 @@ UBackroomsFloorPlan* ABackroomsWorldGenerator::GetOrCreateFloorPlan(const FIntPo
 		Plan->CellSizeWorld = CellSize;
 		Plan->ChunkCellSize = ChunkSizeCells;
 		Plan->RegionSizeCells = ChunkSizeCells * ExtX;
+		Plan->LevelIndex = LevelIndex;
 		Plan->Generate(Seed, RegionCoord);
 		FloorPlanCache.Add(RegionCoord, Plan);
 		return Plan;
