@@ -76,7 +76,7 @@ bool UBackroomsAuthoredRuntimeSubsystem::BuildAuthoredChunk(ABackroomsChunkActor
     if (!Chunk || !Authored || Authored->SizeCells.X <= 0 || Authored->SizeCells.Y <= 0) return false;
     if (Chunk->GeometryMesh)
     {
-        Chunk->GeometryMesh->SetVisibility(false);
+        Chunk->GeometryMesh->ClearAllMeshSections();
         Chunk->GeometryMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
     }
     for (UActorComponent* Component : Chunk->GetComponents())
