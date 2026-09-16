@@ -5,23 +5,25 @@
 #include "BackroomsAuthoredChunk.h"
 #include "BackroomsAuthoredChunkLibrary.generated.h"
 
-/**
- * Per-level authored chunk catalogue.
- *
- * Geometry is not generated here. The catalogue exposes authored variants and
- * performs deterministic selection from the single world seed.
- */
+/** Deterministic catalogue of complete authored chunk templates. */
 UCLASS(BlueprintType)
 class BACKROOMS_API UBackroomsAuthoredChunkLibrary : public UDataAsset
 {
-	GENERATED_BODY()
+    GENERATED_BODY()
 
 public:
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Authored Chunks")
-	TArray<TSoftObjectPtr<UBackroomsAuthoredChunk>> Chunks;
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Authored Chunks")
+    TArray<TSoftObjectPtr<UBackroomsAuthoredChunk>> Chunks;
 
-	void GetCandidates(int32 InLevelIndex, TArray<UBackroomsAuthoredChunk*>& OutCandidates) const;
+    /** Returns only valid templates for the requested level. */
+    void GetCandidates(int32 InLevelIndex, TArray<UBackroomsAuthoredChunk*>& OutCandidates) const;
 
-	/** Purpose identifies the deterministic selection stage. */
-	UBackroomsAuthoredChunk* Select(int32 InSeed, int32 InLevelIndex, const FIntPoint& InChunkCoord, uint32 Purpose) const;
+    /** Deterministic selection. The seed is the only source of variation. */
+    UBackroomsAuthoredChunk* Select(int32 InSeed, int32 InLevelIndex, const FIntPoint& InChunkCoord, uint32 Purpose) const;
+
+    /** Validates the complete authored catalogue and returns human-readable errors. */
+    bool Validate(FString& OutReport) const;
+
+private:
+    static bool ValidateChunk(const UBackroomsAuthoredChunk* Chunk, FString& OutError);
 };
