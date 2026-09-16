@@ -45,10 +45,24 @@ TStatId UBackroomsAuthoredRuntimeSubsystem::GetStatId() const
 
 UBackroomsAuthoredChunkLibrary* UBackroomsAuthoredRuntimeSubsystem::LoadLibrary()
 {
-    if (CachedLibrary) return CachedLibrary;
+    if (CachedLibrary || bLibraryLoadAttempted) return CachedLibrary;
+    bLibraryLoadAttempted = true;
     CachedLibrary = Cast<UBackroomsAuthoredChunkLibrary>(StaticLoadObject(UBackroomsAuthoredChunkLibrary::StaticClass(), nullptr, AuthoredLibraryPath));
-    if (CachedLibrary)
-        UE_LOG(LogTemp, Display, TEXT("BR Authored: loaded %s"), AuthoredLibraryPath);
+    if (!CachedLibrary)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("BR Authored: library not found: %s"), AuthoredLibraryPath);
+        return nullptr;
+    }
+
+    FString ValidationError;
+    if (!CachedLibrary->Validate(ValidationError))
+    {
+        UE_LOG(LogTemp, Error, TEXT("BR Authored: library validation failed: %s"), *ValidationError);
+        CachedLibrary = nullptr;
+        return nullptr;
+    }
+
+    UE_LOG(LogTemp, Display, TEXT("BR Authored: loaded and validated %s"), AuthoredLibraryPath);
     return CachedLibrary;
 }
 
@@ -76,7 +90,11 @@ void UBackroomsAuthoredRuntimeSubsystem::ProcessChunk(ABackroomsChunkActor* Chun
         ProcessedChunks.Add(Chunk, NAME_None);
         return;
     }
-    if (!BuildAuthoredChunk(Chunk, Authored)) return;
+    if (!BuildAuthoredChunk(Chunk, Authored))
+    {
+        ProcessedChunks.Add(Chunk, NAME_None);
+        return;
+    }
     FillSockets(Chunk, Authored);
     ProcessedChunks.Add(Chunk, Authored->ChunkId);
 }
@@ -91,15 +109,6 @@ bool UBackroomsAuthoredRuntimeSubsystem::BuildAuthoredChunk(ABackroomsChunkActor
         return false;
     }
 
-    if (Chunk->GeometryMesh)
-    {
-        Chunk->GeometryMesh->ClearAllMeshSections();
-        Chunk->GeometryMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-    }
-    for (UActorComponent* Component : Chunk->GetComponents())
-        if (URectLightComponent* Light = Cast<URectLightComponent>(Component)) Light->SetVisibility(false);
-    ClearLegacyOwnedActors(Chunk);
-
     UStaticMeshComponent* AuthoredMesh = NewObject<UStaticMeshComponent>(Chunk, NAME_None, RF_Transient);
     if (!AuthoredMesh) return false;
     AuthoredMesh->SetStaticMesh(Mesh);
@@ -109,6 +118,16 @@ bool UBackroomsAuthoredRuntimeSubsystem::BuildAuthoredChunk(ABackroomsChunkActor
     AuthoredMesh->AttachToComponent(Chunk->GetRootComponent(), FAttachmentTransformRules::KeepRelativeTransform);
     AuthoredMesh->SetRelativeLocation(FVector(0.0, 0.0, Authored->FloorZ));
     AuthoredMesh->RegisterComponent();
+
+    if (Chunk->GeometryMesh)
+    {
+        Chunk->GeometryMesh->ClearAllMeshSections();
+        Chunk->GeometryMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    }
+    for (UActorComponent* Component : Chunk->GetComponents())
+        if (URectLightComponent* Light = Cast<URectLightComponent>(Component)) Light->SetVisibility(false);
+    ClearLegacyOwnedActors(Chunk);
+
     UE_LOG(LogTemp, Display, TEXT("BR Authored: chunk (%d,%d) -> %s / %s"), Chunk->ChunkX, Chunk->ChunkY, *Authored->ChunkId.ToString(), *Mesh->GetName());
     return true;
 }
@@ -132,12 +151,14 @@ void UBackroomsAuthoredRuntimeSubsystem::FillSockets(ABackroomsChunkActor* Chunk
     const int32 WorldSeed = Chunk->WorldSeed != 0 ? Chunk->WorldSeed : Chunk->Seed;
     const FBackroomsSeedContext Context{WorldSeed, Authored->LevelIndex, FIntPoint(Chunk->ChunkX, Chunk->ChunkY)};
     const FVector ChunkOrigin = Chunk->GetActorLocation();
+    TSet<FName> UsedSocketIds;
 
     for (const FBackroomsAuthoredRoom& Room : Authored->Rooms)
     {
         for (const FBackroomsAuthoredSocket& Socket : Room.Sockets)
         {
-            if (!Socket.bEnabled) continue;
+            if (!Socket.bEnabled || Socket.Id.IsNone() || UsedSocketIds.Contains(Socket.Id)) continue;
+            UsedSocketIds.Add(Socket.Id);
             FTransform WorldTransform = Socket.LocalTransform;
             WorldTransform.AddToTranslation(ChunkOrigin);
             FRandomStream Stream(Context.MakeStreamSeed(MakeSocketPurpose(Socket)));
