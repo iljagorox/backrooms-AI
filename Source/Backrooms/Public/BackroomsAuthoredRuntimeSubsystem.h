@@ -31,4 +31,6 @@ private:
 
     UPROPERTY()
     TObjectPtr<UBackroomsAuthoredChunkLibrary> CachedLibrary;
+
+    bool bLibraryLoadAttempted = false;
 };
