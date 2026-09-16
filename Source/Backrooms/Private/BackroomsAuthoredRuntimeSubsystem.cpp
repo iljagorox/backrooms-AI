@@ -12,7 +12,7 @@
 
 namespace
 {
-static TAutoConsoleVariable<int32> CVarAuthoredEnabled(TEXT("BR.Authored.Enabled"), 1, TEXT("1 = use authored chunks when the configured library exists; 0 = leave legacy generation untouched."), ECVF_Default);
+static TAutoConsoleVariable<int32> CVarAuthoredEnabled(TEXT("BR.Authored.Enabled"), 1, TEXT("Use authored chunks when the library exists."), ECVF_Default);
 static const TCHAR* AuthoredLibraryPath = TEXT("/Game/Data/BackroomsAuthoredChunks.BackroomsAuthoredChunks");
 static constexpr uint32 SocketPurpose = 0x534F434B;
 
@@ -27,12 +27,16 @@ uint32 MakeSocketPurpose(const FBackroomsAuthoredSocket& Socket)
 bool HasRequiredTag(const FPropRule& Rule, FName Tag)
 {
     if (Tag.IsNone()) return false;
-    for (const FName Required : Rule.RequiredRoomTags) if (Required == Tag) return true;
+    for (const FName Required : Rule.RequiredRoomTags)
+        if (Required == Tag) return true;
     return false;
 }
 }
 
-bool UBackroomsAuthoredRuntimeSubsystem::ShouldCreateSubsystem(UObject* Outer) const { return Outer != nullptr; }
+bool UBackroomsAuthoredRuntimeSubsystem::ShouldCreateSubsystem(UObject* Outer) const
+{
+    return Outer != nullptr;
+}
 
 TStatId UBackroomsAuthoredRuntimeSubsystem::GetStatId() const
 {
@@ -43,7 +47,8 @@ UBackroomsAuthoredChunkLibrary* UBackroomsAuthoredRuntimeSubsystem::LoadLibrary(
 {
     if (CachedLibrary) return CachedLibrary;
     CachedLibrary = Cast<UBackroomsAuthoredChunkLibrary>(StaticLoadObject(UBackroomsAuthoredChunkLibrary::StaticClass(), nullptr, AuthoredLibraryPath));
-    if (CachedLibrary) UE_LOG(LogTemp, Display, TEXT("BR Authored: loaded chunk library %s"), AuthoredLibraryPath);
+    if (CachedLibrary)
+        UE_LOG(LogTemp, Display, TEXT("BR Authored: loaded %s"), AuthoredLibraryPath);
     return CachedLibrary;
 }
 
@@ -53,7 +58,8 @@ void UBackroomsAuthoredRuntimeSubsystem::Tick(float DeltaTime)
     for (TActorIterator<ABackroomsChunkActor> It(GetWorld()); It; ++It)
     {
         ABackroomsChunkActor* Chunk = *It;
-        if (IsValid(Chunk) && !Chunk->bSpawnPlatform && !ProcessedChunks.Contains(Chunk)) ProcessChunk(Chunk);
+        if (IsValid(Chunk) && !Chunk->bSpawnPlatform && !ProcessedChunks.Contains(Chunk))
+            ProcessChunk(Chunk);
     }
 }
 
@@ -65,7 +71,11 @@ void UBackroomsAuthoredRuntimeSubsystem::ProcessChunk(ABackroomsChunkActor* Chun
     const FIntPoint Coord(Chunk->ChunkX, Chunk->ChunkY);
     const int32 Level = static_cast<int32>(Chunk->LevelStyle);
     UBackroomsAuthoredChunk* Authored = Library->Select(WorldSeed, Level, Coord, 0x43484B56);
-    if (!Authored) { ProcessedChunks.Add(Chunk, NAME_None); return; }
+    if (!Authored)
+    {
+        ProcessedChunks.Add(Chunk, NAME_None);
+        return;
+    }
     if (!BuildAuthoredChunk(Chunk, Authored)) return;
     FillSockets(Chunk, Authored);
     ProcessedChunks.Add(Chunk, Authored->ChunkId);
@@ -74,30 +84,30 @@ void UBackroomsAuthoredRuntimeSubsystem::ProcessChunk(ABackroomsChunkActor* Chun
 bool UBackroomsAuthoredRuntimeSubsystem::BuildAuthoredChunk(ABackroomsChunkActor* Chunk, UBackroomsAuthoredChunk* Authored)
 {
     if (!Chunk || !Authored || Authored->SizeCells.X <= 0 || Authored->SizeCells.Y <= 0) return false;
+    UStaticMesh* Mesh = Authored->PreviewMesh.LoadSynchronous();
+    if (!Mesh)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("BR Authored: %s has no PreviewMesh; keeping legacy chunk."), *Authored->GetName());
+        return false;
+    }
+
     if (Chunk->GeometryMesh)
     {
         Chunk->GeometryMesh->ClearAllMeshSections();
         Chunk->GeometryMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
     }
     for (UActorComponent* Component : Chunk->GetComponents())
-        if (URectLightComponent* RectLight = Cast<URectLightComponent>(Component)) RectLight->SetVisibility(false);
+        if (URectLightComponent* Light = Cast<URectLightComponent>(Component)) Light->SetVisibility(false);
     ClearLegacyOwnedActors(Chunk);
 
-    UStaticMesh* Mesh = Authored->PreviewMesh.LoadSynchronous();
-    if (!Mesh)
-    {
-        UE_LOG(LogTemp, Error, TEXT("BR Authored: %s has no PreviewMesh; authored chunk geometry is incomplete."), *Authored->GetName());
-        return false;
-    }
     UStaticMeshComponent* AuthoredMesh = NewObject<UStaticMeshComponent>(Chunk, NAME_None, RF_Transient);
     if (!AuthoredMesh) return false;
     AuthoredMesh->SetStaticMesh(Mesh);
     AuthoredMesh->SetMobility(EComponentMobility::Static);
     AuthoredMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
     AuthoredMesh->SetCollisionProfileName(TEXT("BlockAll"));
-    AuthoredMesh->AttachToComponent(Chunk->GetRootComponent(), FAttachmentTransformRules::KeepWorldTransform);
-    const FVector ChunkOrigin(static_cast<double>(Chunk->ChunkX) * Authored->SizeCells.X * Authored->CellSize, static_cast<double>(Chunk->ChunkY) * Authored->SizeCells.Y * Authored->CellSize, Authored->FloorZ);
-    AuthoredMesh->SetWorldLocation(ChunkOrigin);
+    AuthoredMesh->AttachToComponent(Chunk->GetRootComponent(), FAttachmentTransformRules::KeepRelativeTransform);
+    AuthoredMesh->SetRelativeLocation(FVector(0.0, 0.0, Authored->FloorZ));
     AuthoredMesh->RegisterComponent();
     UE_LOG(LogTemp, Display, TEXT("BR Authored: chunk (%d,%d) -> %s / %s"), Chunk->ChunkX, Chunk->ChunkY, *Authored->ChunkId.ToString(), *Mesh->GetName());
     return true;
@@ -112,7 +122,8 @@ void UBackroomsAuthoredRuntimeSubsystem::ClearLegacyOwnedActors(ABackroomsChunkA
         AActor* Actor = *It;
         if (Actor && Actor->GetOwner() == Chunk) OwnedActors.Add(Actor);
     }
-    for (AActor* Actor : OwnedActors) if (IsValid(Actor)) Actor->Destroy();
+    for (AActor* Actor : OwnedActors)
+        if (IsValid(Actor)) Actor->Destroy();
 }
 
 void UBackroomsAuthoredRuntimeSubsystem::FillSockets(ABackroomsChunkActor* Chunk, UBackroomsAuthoredChunk* Authored)
@@ -120,7 +131,7 @@ void UBackroomsAuthoredRuntimeSubsystem::FillSockets(ABackroomsChunkActor* Chunk
     if (!Chunk || !Authored || !GetWorld()) return;
     const int32 WorldSeed = Chunk->WorldSeed != 0 ? Chunk->WorldSeed : Chunk->Seed;
     const FBackroomsSeedContext Context{WorldSeed, Authored->LevelIndex, FIntPoint(Chunk->ChunkX, Chunk->ChunkY)};
-    const FVector ChunkOrigin(static_cast<double>(Chunk->ChunkX) * Authored->SizeCells.X * Authored->CellSize, static_cast<double>(Chunk->ChunkY) * Authored->SizeCells.Y * Authored->CellSize, Authored->FloorZ);
+    const FVector ChunkOrigin = Chunk->GetActorLocation();
 
     for (const FBackroomsAuthoredRoom& Room : Authored->Rooms)
     {
@@ -137,10 +148,14 @@ void UBackroomsAuthoredRuntimeSubsystem::FillSockets(ABackroomsChunkActor* Chunk
                 FActorSpawnParameters Params;
                 Params.Owner = Chunk;
                 Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-                ABackroomsItemPickup* Pickup = GetWorld()->SpawnActor<ABackroomsItemPickup>(Chunk->ItemPickupClass, WorldTransform, Params);
-                if (Pickup) { Pickup->ItemId = Socket.Tag; Pickup->Count = 1; }
+                if (ABackroomsItemPickup* Pickup = GetWorld()->SpawnActor<ABackroomsItemPickup>(Chunk->ItemPickupClass, WorldTransform, Params))
+                {
+                    Pickup->ItemId = Socket.Tag;
+                    Pickup->Count = 1;
+                }
                 continue;
             }
+
             if (Socket.Kind == EBackroomsSocketKind::Light)
             {
                 URectLightComponent* Light = NewObject<URectLightComponent>(Chunk, NAME_None, RF_Transient);
@@ -148,15 +163,13 @@ void UBackroomsAuthoredRuntimeSubsystem::FillSockets(ABackroomsChunkActor* Chunk
                 Light->SetMobility(EComponentMobility::Movable);
                 Light->SetIntensity(900.0f);
                 Light->SetAttenuationRadius(850.0f);
-                Light->SetSourceWidth(80.0f);
-                Light->SetSourceHeight(80.0f);
                 Light->AttachToComponent(Chunk->GetRootComponent(), FAttachmentTransformRules::KeepWorldTransform);
                 Light->SetWorldTransform(WorldTransform);
                 Light->RegisterComponent();
                 continue;
             }
-            if ((Socket.Kind != EBackroomsSocketKind::Trash && Socket.Kind != EBackroomsSocketKind::Furniture) || !Chunk->Database || Socket.Tag.IsNone()) continue;
 
+            if ((Socket.Kind != EBackroomsSocketKind::Trash && Socket.Kind != EBackroomsSocketKind::Furniture) || !Chunk->Database || Socket.Tag.IsNone()) continue;
             TArray<const FPropRule*> Candidates;
             for (const FPropRule& Rule : Chunk->Database->Props)
                 if (!Rule.Mesh.IsNull() && HasRequiredTag(Rule, Socket.Tag)) Candidates.Add(&Rule);
@@ -165,6 +178,7 @@ void UBackroomsAuthoredRuntimeSubsystem::FillSockets(ABackroomsChunkActor* Chunk
             if (!Rule || Stream.FRand() > FMath::Clamp(Rule->Probability, 0.0f, 1.0f)) continue;
             UStaticMesh* PropMesh = Rule->Mesh.LoadSynchronous();
             if (!PropMesh) continue;
+
             UStaticMeshComponent* PropComponent = NewObject<UStaticMeshComponent>(Chunk, NAME_None, RF_Transient);
             if (!PropComponent) continue;
             const float ScaleX = FMath::Lerp(Rule->ScaleMin.X, Rule->ScaleMax.X, Stream.FRand());
